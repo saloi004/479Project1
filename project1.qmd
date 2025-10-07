@@ -1,0 +1,1832 @@
+---
+title: "Analysis of the Specific Manifestations of Football Home Advantage on Players' and Teams' Offensive Performance"
+format:
+  html:
+    toc: true
+    toc-depth: 4
+    toc-title: "Sections" 
+    toc-location: left
+    toc-float: true
+editor: visual
+code-fold: true
+---
+
+### Group 3
+
+The order of the names is based on the sort order in Canvas.
+
+**Liya Shi :** Formula Building, Concluding and Report integration
+
+**Yuchen Song :** Part 3 Coding
+
+**Yuxiao Li :** Part 2 Coding
+
+**Yuzhen Jiang :** Part 1 Coding
+
+# Executive Summary
+
+In this project, we will mainly use relevant data from the 2015/16 Bundesliga season to study the specific manifestations of the home and away factors on both players and teams.
+
+The reason for choosing this dataset as the research object is that the Bundesliga is renowned for its more open style of play, stronger offensive awareness, and the well-known **"DEVIL HOME ADVANTAGE"**. Meanwhile, using league data allows for more accurate home-away comparisons — by conducting self-comparisons of each team, we can minimize discrepancies caused by inherent differences in team strength as much as possible.
+
+We will approach the research from three perspectives:
+
+**1) Measurement of objective differences in offensive performance** We will compare Expected Goals (xG) with actual goals, along with other objective data that may require simple calculations. The method for calculating Expected Goals will be based on the approach taught in the course, with reasonable improvements made. The comparison between Expected Goals and actual goals reflects a player’s ability to capitalize on opportunities, while the number of Expected Goals indicates the ability to create opportunities. We regard these two metrics as the most objective factors for analytical comparison.
+
+**2) Player behavior** Generally, metrics such as the number of shots and their locations, the number of forward passes, and the number and distance of long diagonal passes are considered indicators of offensive tendency. We will measure these conscious behaviors in a more objective manner, using them as a key criterion to assess the home advantage factor.
+
+**3) Player positions where possession is held** By creating heatmaps, we will compare the main active zones of the team (e.g., the percentage of time spent near the opponent’s goal). If possession is predominantly active in the opponent’s half, it signifies a higher offensive tendency.
+
+# Technical Report
+
+## PART 1: Measurement of Home-Away Performance Differences for the Same Team
+
+This section of the analysis processes match data to evaluate and compare a team's performance in home games versus away games.
+
+We first aggregates statistics from individual matches and then calculates season-long totals for key metrics like goals, shots, and expected goals (xG), distinguishing between home and away fixtures.
+
+Finally, it computes several performance indicators to allow for a clearer comparison, such as:
+
+⁃ Goals per game
+
+⁃ Expected goals per game
+
+⁃ Shots per game
+
+⁃ The difference between actual goals scored and expected goals
+
+The resulting table provides a clear summary, making it easy to see how a team's offensive output changes depending on whether they are playing at their home stadium or away. We take Bayern Munish as an example.
+
+### Data Preparation
+
+#### Package Preparation
+
+```{r, eval=FALSE}
+library(StatsBombR)
+library(ranger)
+library(ggplot2)
+library(ggrepel)
+library(patchwork)
+```
+
+#### Custom Data List
+
+We chose the 2015/16 Men's Bundesliga Data to analyze.
+
+```{r, eval=FALSE}
+match <- 
+  StatsBombR::FreeCompetitions() |>
+  dplyr::filter(competition_id == 9 & season_id == 27) |>
+  StatsBombR::FreeMatches()
+
+event <- 
+  match |>
+  StatsBombR::free_allevents() |>
+  StatsBombR::allclean() |>
+  StatsBombR::get.opposingteam()
+
+orig_shots <-
+  event |>
+  dplyr::filter(type.name == "Shot" & shot.body_part.name != "Other") |>  
+  dplyr::mutate(Y = ifelse(shot.outcome.name == "Goal", 1, 0)) |>
+  dplyr::select(where(~!all(is.na(.))))
+```
+
+#### Label the Home/Away Matches
+
+```{r, eval=FALSE}
+home_teams <- 
+  match %>%
+  select(match_id, team.name = home_team.home_team_name) %>%
+  mutate(home_and_away = "Home")
+
+away_teams <- 
+  match %>%
+  select(match_id, team.name = away_team.away_team_name) %>%
+  mutate(home_and_away = "Away")
+
+match_locations <- bind_rows(home_teams, away_teams)
+shots <- left_join(orig_shots, match_locations, by = c("match_id", "team.name"))
+```
+
+### Model Development
+
+We developed two Random Forest models to predict goal probability:
+
+**Model A (Baseline):** Excludes home/away information - Features: shot type, technique, body part, distance/angle metrics, defensive pressure indicators
+
+**Model B (With Home/Away):** Includes home/away indicator - All Model A features + home_and_away variable
+
+::: callout-note
+The hyperparameters for the Random Forest model are specified in both models. These settings are crucial for controlling the model’s complexity and preventing overfitting.
+
+· probability = TRUE
+
+· max.depth = 10
+
+· min.node.size = 50
+
+· sample.fraction = 0.8
+
+· mtry = floor(sqrt(n_features))
+
+Evaluation Method
+
+· 100 simulations with 75/25 train-test split
+
+· Metric: Log Loss (lower is better)
+
+· Statistical testing: Paired t-tests
+:::
+
+### Data Preprocessing
+
+```{r, eval=FALSE}
+n <- nrow(shots)
+n_train <- floor(0.75 * n)
+n_test <- n - n_train
+
+shots <- shots |> dplyr::mutate(id = 1:n)
+
+# Features for model A: without home and away feature
+shot_vars_baseline <-
+  c("Y",
+    "shot.type.name", 
+    "shot.technique.name", "shot.body_part.name",
+    "DistToGoal", "DistToKeeper",
+    "AngleToGoal", "AngleToKeeper",
+    "AngleDeviation", 
+    "avevelocity","density", "density.incone",
+    "distance.ToD1", "distance.ToD2",
+    "AttackersBehindBall", "DefendersBehindBall",
+    "DefendersInCone", "InCone.GK", "DefArea")
+
+# Features for model B: with home and away feature
+shot_vars_with_home <-
+  c(shot_vars_baseline, "home_and_away")
+
+shots <- shots |>
+  dplyr::mutate(
+    shot.type.name = factor(shot.type.name),
+    shot.body_part.name = factor(shot.body_part.name),
+    shot.technique.name = factor(shot.technique.name),
+    home_and_away = factor(home_and_away)
+  )
+```
+
+### Logloss Function
+
+```{r, eval=FALSE}
+logloss <- function(y, phat){
+  if(any(phat < 1e-12)) phat[phat < 1e-12] <- 1e-12
+  if(any(phat > 1-1e-12)) phat[phat > 1-1e-12] <- 1-1e-12
+  return(-1 * mean(y * log(phat) + (1-y) * log(1-phat)))
+}
+```
+
+### Model A (sim 100):
+
+```{r, eval=FALSE}
+n_sims <- 100
+train_logloss_A <- rep(NA, times = n_sims)
+test_logloss_A <- rep(NA, times = n_sims)
+
+for(r in 1:n_sims){
+  set.seed(479+r)
+  
+  # divide train & test
+  train_data <-
+    shots |>
+    dplyr::slice_sample(n = n_train) |>
+    dplyr::select(dplyr::all_of(c("id",shot_vars_baseline)))
+
+  test_data <-
+    shots |>
+    dplyr::anti_join(y = train_data, by = "id") |>
+    dplyr::select(dplyr::all_of(c("id", shot_vars_baseline)))
+
+  y_train <- train_data$Y
+  y_test <- test_data$Y
+
+  train_data <-
+    train_data |>
+    dplyr::mutate(Y = factor(Y, levels = c(0,1))) |>
+    dplyr::select(-id)
+  
+  test_data <-
+    test_data |>
+    dplyr::mutate(Y = factor(Y, levels = c(0,1))) |>
+    dplyr::select(-id)
+  
+  # fit model
+  fit <- ranger::ranger(
+    formula = Y~.,
+    data = train_data, 
+    probability = TRUE,
+    max.depth = 10,
+    min.node.size = 50,
+    sample.fraction = 0.8,
+    mtry = floor(sqrt(ncol(train_data) - 1))
+    )
+  
+  train_preds <- 
+    predict(object = fit, data = train_data)$predictions[,2]
+
+  test_preds <- 
+    predict(object = fit, data = test_data)$predictions[,2]
+
+  train_logloss_A[r] <- logloss(y_train, train_preds)
+  test_logloss_A[r] <- logloss(y_test, test_preds)
+}
+```
+
+Model A - RandomForest training logloss: 0.2084
+
+Model A - RandomForest testing logloss: 0.2631
+
+### Model B (sim 100):
+
+```{r, eval=FALSE}
+train_logloss_B <- rep(NA, times = n_sims)
+test_logloss_B <- rep(NA, times = n_sims)
+
+for(r in 1:n_sims){
+  set.seed(479+r)
+  
+  # divide train & test
+  train_data <- shots |>
+    dplyr::slice_sample(n = n_train) |>
+    dplyr::select(dplyr::all_of(c("id", shot_vars_with_home)))
+  
+  test_data <- shots |>
+    dplyr::anti_join(y = train_data, by = "id") |>
+    dplyr::select(dplyr::all_of(c("id", shot_vars_with_home)))
+  
+  y_train <- train_data$Y
+  y_test <- test_data$Y
+  
+  train_data <- train_data |>
+    dplyr::mutate(Y = factor(Y, levels = c(0, 1))) |>
+    dplyr::select(-id)
+  
+  test_data <- test_data |>
+    dplyr::mutate(Y = factor(Y, levels = c(0, 1))) |>
+    dplyr::select(-id)
+  
+  # fit model
+  fit <- ranger::ranger(
+    formula = Y ~ .,
+    data = train_data, 
+    probability = TRUE,
+    max.depth = 10,
+    min.node.size = 50,
+    sample.fraction = 0.8,
+    mtry = floor(sqrt(ncol(train_data) - 1))
+  )
+  
+  train_preds <- 
+    predict(object = fit, data = train_data)$predictions[, 2]
+  
+  test_preds <- 
+    predict(object = fit, data = test_data)$predictions[, 2]
+  
+  train_logloss_B[r] <- logloss(y_train, train_preds)
+  test_logloss_B[r] <- logloss(y_test, test_preds)
+}
+```
+
+Model B - RandomForest training logloss: 0.2094
+
+Model B - RandomForest testing logloss: 0.2634
+
+### Model Comparison
+
+```{r, eval=FALSE}
+# Improvement Calculation
+improvement_train <- (mean(train_logloss_A) - mean(train_logloss_B)) / mean(train_logloss_A) * 100
+improvement_test <- (mean(test_logloss_A) - mean(test_logloss_B)) / mean(test_logloss_A) * 100
+
+# t test
+t_test_train <- t.test(train_logloss_A, train_logloss_B, paired = TRUE)
+t_test_test <- t.test(test_logloss_A, test_logloss_B, paired = TRUE)
+```
+
+Training Log Loss Improvement: -0.45 %
+
+Testing Log Loss Improvement: -0.11 %
+
+Paired t-test for Training Log Loss: p-value: \< 2.22e-16
+
+Paired t-test for Testing Log Loss: p-value: 1.6013e-06
+
+```{r, eval=FALSE}
+performance_df <- data.frame(
+  Model = rep(c("Model A\n(Baseline)", "Model B\n(+ Home/Away)"), each = 2),
+  Type = rep(c("Training", "Testing"), 2),
+  LogLoss = c(mean(train_logloss_A), mean(test_logloss_A),
+              mean(train_logloss_B), mean(test_logloss_B)),
+  SD = c(sd(train_logloss_A), sd(test_logloss_A),
+         sd(train_logloss_B), sd(test_logloss_B))
+)
+
+p1 <- ggplot(performance_df, aes(x = Model, y = LogLoss, fill = Type)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_errorbar(aes(ymin = LogLoss - SD, ymax = LogLoss + SD),
+                position = position_dodge(width = 0.8), width = 0.25) +
+  scale_fill_manual(values = c("Training" = "#3498db", "Testing" = "#e74c3c")) +
+  labs(title = "Model Performance Comparison",
+       subtitle = "Lower Log Loss = Better Performance",
+       y = "Log Loss", x = "") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, color = "gray40"))
+
+```
+
+![](1.png)
+
+### Result Saving
+
+```{r, eval=FALSE}
+full_data_baseline <- shots |>
+  dplyr::select(dplyr::all_of(shot_vars_baseline))
+
+full_data_with_home <- shots |>
+  dplyr::select(dplyr::all_of(shot_vars_with_home))
+
+# final model A
+final_model_A <- ranger::ranger(
+  formula = Y ~ .,
+  data = full_data_baseline, 
+  probability = TRUE,
+  max.depth = 10,
+  min.node.size = 50,
+  sample.fraction = 0.8
+)
+
+shots <- shots |>
+  dplyr::mutate(
+    xg_baseline = predict(object = final_model_A, data = shots)$predictions[, 2]
+  )
+
+comparison_stats <- shots |>
+  summarise(
+    mean_baseline = mean(xg_baseline),
+    mean_statsbomb = mean(shot.statsbomb_xg, na.rm = TRUE),
+    cor_baseline_sb = cor(xg_baseline, shot.statsbomb_xg, use = "complete.obs")
+  )
+
+```
+
+#### **Key Finding**
+
+Although the performance difference between models is statistically significant (p \< 0.00001), the practical improvement is minimal. Simply adding a “home/away” label provides limited additional predictive information when shot characteristics are already captured.
+
+This suggests that home advantage effects are already implicitly encoded in the existing technical features (shot location, defensive pressure, etc.), and the explicit home/away indicator adds little marginal value for prediction.
+
+**Conclusion:** We proceed with Model A (Baseline) for subsequent analysis, as it provides cleaner xG estimates without the explicit home/away bias.
+
+### Home and Away Advantage
+
+```{r, eval=FALSE}
+# team's xg & shot summary based on match
+team_match_performance <- shots |>
+  group_by(match_id, team.name, home_and_away) |>
+  summarise(
+    total_goals = sum(Y),
+    total_xg_baseline = sum(xg_baseline),
+    num_shots = n(),
+    .groups = 'drop'
+  )
+
+# team's xg & shot summary based on season
+team_season_performance <- team_match_performance |>
+  group_by(team.name, home_and_away) |>
+  summarise(
+    games_played = n(),
+    total_goals = sum(total_goals),
+    total_xg_baseline = sum(total_xg_baseline),
+    total_shots = sum(num_shots),
+    .groups = 'drop'
+  ) |>
+  mutate(
+    # per game
+    goals_per_game = total_goals / games_played,
+    xg_per_game_baseline = total_xg_baseline / games_played,
+    shots_per_game = total_shots / games_played,
+    
+    # per shot
+    xg_per_shot_baseline = total_xg_baseline / total_shots,
+    
+    # Goals - xG
+    g_minus_xg_baseline = total_goals - total_xg_baseline
+  )
+```
+
+![](2.png)
+
+### Home vs Away Comparison
+
+Building on the previous data, this code is designed to directly measure and compare the "home advantage" across all teams in the dataset.
+
+First, the data is restructured to place each team's home and away statistics side-by-side. The code then calculates the precise difference between the home and away values for key metrics. This quantifies how much a team's performance in areas like goal scoring, chance creation (xG), and shooting efficiency improves when playing at home.
+
+Finally, teams are ranked based on the magnitude of their home advantage. This produces a series of ranked lists to easily identify which teams benefit the most from playing at home, based on different criteria:
+
+⁃ The largest increase in goals scored.
+
+⁃ The largest improvement in chance creation (xG).
+
+⁃ The biggest boost in finishing efficiency (the difference between actual goals and expected goals).
+
+```{r, eval=FALSE}
+# For each team
+team_home_away_comparison <- team_season_performance |>
+  select(team.name, home_and_away, 
+         goals_per_game, xg_per_game_baseline,
+         shots_per_game, xg_per_shot_baseline,
+         g_minus_xg_baseline) |>
+  pivot_wider(
+    names_from = home_and_away,
+    values_from = c(goals_per_game, xg_per_game_baseline,
+                    shots_per_game, xg_per_shot_baseline,
+                    g_minus_xg_baseline)
+  ) |>
+  mutate(
+    # Difference between home and away
+    goals_advantage = goals_per_game_Home - goals_per_game_Away,
+    xg_advantage_baseline = xg_per_game_baseline_Home - xg_per_game_baseline_Away,
+    shots_advantage = shots_per_game_Home - shots_per_game_Away,
+    
+    # goal-xg (efficiency) difference
+    efficiency_advantage_baseline = g_minus_xg_baseline_Home - g_minus_xg_baseline_Away
+  )
+```
+
+#### Ranking
+
+```{r, eval=FALSE}
+top_home_advantage_goals <- team_home_away_comparison |>
+  arrange(desc(goals_advantage))
+
+top_home_advantage_xg <- team_home_away_comparison |>
+  arrange(desc(xg_advantage_baseline))
+
+top_home_advantage_efficiency <- team_home_away_comparison |>
+  arrange(desc(efficiency_advantage_baseline))
+```
+
+![](3.png) ![](4.png) ![](5.png)
+
+```{r, eval=FALSE}
+p1 <- team_home_away_comparison |>
+  arrange(xg_advantage_baseline) |>
+  mutate(team.name = factor(team.name, levels = team.name)) |>
+  ggplot(aes(y = team.name)) +
+  geom_segment(aes(x = 0, xend = xg_advantage_baseline, yend = team.name),
+               color = "gray70", size = 0.8) +
+  geom_point(aes(x = xg_advantage_baseline), color = "#27ae60", size = 3) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red", alpha = 0.5) +
+  labs(title = "Home xG Advantage by Team (Baseline Model)",
+       subtitle = "Difference in xG per Game: Home - Away",
+       x = "xG per Game Advantage", y = "") +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+![](6.png)
+
+### Statistical Analysis
+
+#### League-Wide Performance Distribution
+
+This visualization compares the distribution of all teams' performances at home versus away for three key metrics:
+
+-   Goals per Game
+
+-   Shots per Game
+
+-   xG (Expected Goals) per Game
+
+This chart offers immediate visual evidence that teams across the league tend to generate a higher offensive output when playing at their home stadium.
+
+```{r, eval=FALSE}
+# total
+league_summary <- team_season_performance |>
+  group_by(home_and_away) |>
+  summarise(
+    avg_goals = mean(goals_per_game),
+    avg_xg_baseline = mean(xg_per_game_baseline),
+    avg_shots = mean(shots_per_game),
+    .groups = 'drop'
+  )
+
+# home and away compare
+team_performance_long <- team_season_performance |>
+  select(team.name, home_and_away, goals_per_game, 
+         xg_per_game_baseline, shots_per_game) |>
+  pivot_longer(cols = c(goals_per_game, xg_per_game_baseline, shots_per_game),
+               names_to = "Metric", values_to = "Value") |>
+  mutate(Metric = recode(Metric,
+                        "goals_per_game" = "Goals per Game",
+                        "xg_per_game_baseline" = "xG per Game",
+                        "shots_per_game" = "Shots per Game"))
+```
+
+```{r, eval=FALSE}
+p4 <- ggplot(team_performance_long, aes(x = home_and_away, y = Value, fill = home_and_away)) +
+  geom_boxplot(alpha = 0.7, outlier.alpha = 0.5) +
+  geom_jitter(width = 0.2, alpha = 0.3, size = 1.5) +
+  facet_wrap(~Metric, scales = "free_y", nrow = 1) +
+  scale_fill_manual(values = c("Home" = "#27ae60", "Away" = "#c0392b")) +
+  labs(title = "Team-level Performance: Home vs Away",
+       x = "", y = "Value") +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"),
+        legend.position = "none")
+```
+
+![](7.png)
+
+#### Expected vs. Actual Goals
+
+This scatter plot examines the relationship between chance creation (xG per Game) and actual offensive output (Goals per Game) for each team.
+
+-   Each point on the plot represents a team's seasonal average, with different shapes and colors for home and away performance.
+
+-   A diagonal line indicates the benchmark where actual goals equal expected goals. Teams above the line outperform their xG (strong finishing), while those below underperform. This visualization allows for a deeper, team-by-team analysis of finishing ability and whether it changes between home and away fixtures.
+
+This chart reveals two key league-wide trends regarding home-field advantage:
+
+**1. Increased Offensive Output at Home**
+
+The cluster of home performances (green triangles ▲) is clearly shifted towards the top-right compared to away performances (red circles ●). This indicates that, as a league, teams consistently create more valuable chances (higher xG) and score more goals when playing at home.
+
+**2. Finishing Efficiency Remains Stable**
+
+There is no systematic trend showing that teams are better finishers at home. Both home and away data points are distributed evenly around the diagonal line, which represents performing to expectation. This suggests a team's finishing skill is a stable characteristic, regardless of venue.
+
+```{r, eval=FALSE}
+# Goals vs xG
+p5 <- team_season_performance |>
+  ggplot(aes(x = xg_per_game_baseline, y = goals_per_game, 
+             color = home_and_away, shape = home_and_away)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray40") +
+  geom_point(size = 3, alpha = 0.7) +
+  geom_text_repel(aes(label = ifelse(abs(goals_per_game - xg_per_game_baseline) > 0.3,
+                                     team.name, "")),
+                 size = 2.5, max.overlaps = 15) +
+  scale_color_manual(values = c("Home" = "#27ae60", "Away" = "#c0392b")) +
+  labs(title = "Expected vs Actual Goals: Home vs Away",
+       subtitle = "Points above line = outperforming xG; below = underperforming",
+       x = "xG per Game (Model A)", y = "Actual Goals per Game",
+       color = "", shape = "") +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+![](8.png)
+
+#### Statistical Significance Testing
+
+In this section, we classify teams into four distinct profiles based on how they benefit from playing at home. It moves beyond asking if there is a home advantage to define what kind of advantage each team has.
+
+```{r, eval=FALSE}
+# t test for xG per game (Home vs Away)
+home_xg <- team_season_performance |> 
+  filter(home_and_away == "Home") |> 
+  pull(xg_per_game_baseline)
+
+away_xg <- team_season_performance |> 
+  filter(home_and_away == "Away") |> 
+  pull(xg_per_game_baseline)
+
+t_test_xg <- t.test(home_xg, away_xg, paired = TRUE)
+```
+
+::: {.callout-note appearance="default" label="none"}
+**Paired t-test for xG per game (Home vs Away):**
+
+Mean difference: 0.2981
+
+t = 5.011
+
+p-value: 0.0001071
+:::
+
+```{r, eval=FALSE}
+# t-test for Goals per game (Home vs Away)
+home_goals <- team_season_performance |> 
+  filter(home_and_away == "Home") |> 
+  pull(goals_per_game)
+
+away_goals <- team_season_performance |> 
+  filter(home_and_away == "Away") |> 
+  pull(goals_per_game)
+
+t_test_goals <- t.test(home_goals, away_goals, paired = TRUE)
+```
+
+::: {.callout-note appearance="default" label="none"}
+**Paired t-test for Goals per game (Home vs Away):**
+
+Mean difference: 0.2908
+
+t = 2.2769
+
+p-value: 0.036004
+:::
+
+```{r, eval=FALSE}
+# t-test for Efficiency (G-xG) (Home vs Away)
+home_efficiency <- team_home_away_comparison$g_minus_xg_baseline_Home
+away_efficiency <- team_home_away_comparison$g_minus_xg_baseline_Away
+
+t_test_efficiency <- t.test(home_efficiency, away_efficiency, paired = TRUE)
+cat("Paired t-test for Efficiency (G-xG) (Home vs Away):\n")
+```
+
+::: {.callout-note appearance="default" label="none"}
+**Paired t-test for Efficiency (G-xG) (Home vs Away):**
+
+Mean difference: -0.1236
+
+t = -0.0762
+
+p-value: 0.94018
+:::
+
+#### Interpretation
+
+Home teams in the Bundesliga create approximately **0.30 more XG per game** compared to their away performances, translating to roughly **0.29 more actual goals**. The strong alignment between XG difference and actual goal difference suggests that:
+
+**1. Quality Over Luck:**
+
+The home advantage effect is not driven by teams getting “lucky” or overperforming their XG at home. The alignment between XG difference (+0.30) and actual goal difference (+0.29) demonstrates that home teams score more because they create better chances, not because they convert similar chances at higher rates.
+
+**2. Mechanism Clarification:**
+
+Mechanism Clarification: Home advantage appears to work through tactical and behavioral mechanisms that improve shot selection and positioning—such as more aggressive pressing, better possession in dangerous areas, and reduced defensive pressure from opponents—rather than through psychological factors that might improve individual shooting technique or composure.
+
+### Team classification based on results above
+
+Teams can be classified based on two dimensions:
+
+**X-axis (Chance Creation Advantage)**
+
+Measures how much a team's ability to create high-quality chances (xG) improves at home compared to away.
+
+**Y-axis(Efficiency Advantage)**
+
+Measures how much a team's finishing skill (scoring more goals than expected) improves at home.
+
+Teams are plotted and categorized into four quadrants based on whether they perform above or below the league median on these two metrics.
+
+**The Four Team Profiles**
+
+*1. Super Home (Top-Right)*
+
+These teams receive the complete home advantage. They become better at both creating more chances and converting them at a higher rate.
+
+*2. Efficient (Top-Left)*
+
+These teams don't create significantly more chances at home, but they become much more clinical and effective finishers.
+
+*3. Chance Creator (Bottom-Right)*
+
+These teams leverage their home stadium to generate a much higher volume of chances, but their conversion rate does not improve.
+
+*4. Home Insensitive (Bottom-Left)*
+
+These teams are largely unaffected by playing at home, showing no significant improvement in either chance creation or finishing efficiency.
+
+```{r, eval=FALSE}
+team_quadrant <- team_home_away_comparison |>
+  mutate(
+    # take median as boundary
+    creates_chances = xg_advantage_baseline > median(xg_advantage_baseline),
+    converts_chances = efficiency_advantage_baseline > median(efficiency_advantage_baseline),
+    
+    # classification
+    quadrant = case_when(
+      creates_chances & converts_chances ~ "Super Home",
+      creates_chances & !converts_chances ~ "Chance Creator",
+      !creates_chances & converts_chances ~ "Efficient",
+      !creates_chances & !converts_chances ~ "Home Insensitive"
+    )
+  )
+
+p6 <- ggplot(team_quadrant, 
+             aes(x = xg_advantage_baseline, y = efficiency_advantage_baseline)) +
+  geom_hline(yintercept = median(team_quadrant$efficiency_advantage_baseline), 
+             linetype = "dashed", color = "gray40") +
+  geom_vline(xintercept = median(team_quadrant$xg_advantage_baseline), 
+             linetype = "dashed", color = "gray40") +
+  geom_point(aes(color = quadrant), size = 4, alpha = 0.7) +
+  geom_text_repel(aes(label = team.name), size = 2.8, max.overlaps = 20) +
+  scale_color_manual(values = c(
+    "Super Home" = "#27ae60",
+    "Chance Creator" = "#3498db",
+    "Efficient" = "#f39c12",
+    "Home Insensitive" = "#95a5a6"
+  )) +
+  labs(title = "Home Advantage: Chance Creation vs Conversion",
+       x = "xG Advantage (Home - Away)\n← Less Chances | More Chances →",
+       y = "Efficiency Advantage (G-xG)\n← Less Efficient | More Efficient →",
+       color = "Team Type") +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"),
+        legend.position = "bottom")
+```
+
+![](9.png) ![](10.png) Then we save the data into csv file for further study.
+
+### Conclusion
+
+Through the chart, we can subjectively categorize teams based on their home and away performances. However, through the specific differences in the objective data, we can infer that the home field factor does indeed influence team performance. We will incorporate this concept into the subsequent formula development.
+
+## PART 2: Analysis of Player Behaviors
+
+### Data Preparation
+
+#### Package Preparation
+
+```{r, eval=FALSE}
+library(dplyr)
+library(purrr)
+library(glue)
+library(httr)
+library(jsonlite)
+library(StatsBombR)
+library(ggplot2)
+```
+
+#### Standard Data and Data Import
+
+```{r, eval=FALSE}
+options(timeout = 1200)
+SUBSET_N <- Inf
+SB_CACHE <- glue("sb_bundesliga_2015_events_n{ifelse(is.finite(SUBSET_N), SUBSET_N, 'ALL')}.rds")
+
+if (!file.exists(SB_CACHE)) {
+  comps <- FreeCompetitions() %>% filter(competition_id == 9, season_id == 27)
+  matches_all <- FreeMatches(comps)
+  matches <- if (is.finite(SUBSET_N)) slice_head(matches_all, n = SUBSET_N) else matches_all
+
+  fetch_one <- function(mid) {
+    url <- glue("https://raw.githubusercontent.com/statsbomb/open-data/master/data/events/{mid}.json")
+    tryCatch({
+      res <- httr::GET(url, httr::timeout(60))
+      txt <- httr::content(res, "text", encoding = "UTF-8")
+      df <- jsonlite::fromJSON(txt, flatten = TRUE)
+      df$match_id <- mid
+      df
+    }, error = function(e) {
+      message(glue("Skip match {mid}: {conditionMessage(e)}"))
+      NULL
+    })
+  }
+
+  events_raw <- purrr::map(matches$match_id, fetch_one) %>% purrr::compact() %>% bind_rows()
+  saveRDS(events_raw, SB_CACHE)
+}
+```
+
+#### Home and Away Matches
+
+```{r, eval=FALSE}
+event <- readRDS(SB_CACHE)
+
+home_teams <- FreeMatches(
+  FreeCompetitions() %>% filter(competition_id == 9, season_id == 27)
+) %>% select(match_id, team.name = home_team.home_team_name) %>% mutate(home_away = "Home")
+
+away_teams <- FreeMatches(
+  FreeCompetitions() %>% filter(competition_id == 9, season_id == 27)
+) %>% select(match_id, team.name = away_team.away_team_name) %>% mutate(home_away = "Away")
+
+match_locations <- bind_rows(home_teams, away_teams)
+
+event <- event %>%
+  left_join(match_locations, by = c("match_id", "team.name")) %>%
+  filter(!is.na(player.id))
+```
+
+#### Getting 2015/16 Men's Bundesliga Data
+
+```{r, eval=FALSE}
+match <- StatsBombR::FreeCompetitions() %>%
+  dplyr::filter(competition_id == 9 & season_id == 27) %>%
+  StatsBombR::FreeMatches()
+
+event <- match %>%
+  StatsBombR::free_allevents() %>%
+  StatsBombR::allclean() %>%
+  StatsBombR::get.opposingteam()
+```
+
+#### Labelling
+
+```{r, eval=FALSE}
+home_teams <- match %>%
+  select(match_id, team.name = home_team.home_team_name) %>%
+  mutate(home_away = "Home")
+away_teams <- match %>%
+  select(match_id, team.name = away_team.away_team_name) %>%
+  mutate(home_away = "Away")
+match_locations <- bind_rows(home_teams, away_teams)
+
+event <- event %>%
+  left_join(match_locations, by = c("match_id", "team.name"))
+```
+
+#### Important Part Keeping
+
+```{r, eval=FALSE}
+player_events <- event %>%
+  select(match_id, team.name, home_away,
+         player.id, player.name,
+         type.name, possession_team.name,
+         location.x, location.y,
+         pass.length, pass.angle,
+         pass.end_location.x, pass.end_location.y,
+         pass.height.name, pass.outcome.name,
+         pass.switch, pass.through_ball,
+         carry.end_location.x, carry.end_location.y,
+         pass.shot_assist, shot.outcome.name) %>%
+  filter(!is.na(player.id))
+```
+
+#### Indicator Definition Tool Function
+
+```{r, eval=FALSE}
+# Is the ball forward (end_x > start_x; StatsBomb x direction usually attacks the opponent's goal direction)
+is_forward_pass <- function(x_start, x_end) {
+  ifelse(!is.na(x_start) & !is.na(x_end), x_end > x_start, NA)
+}
+
+# Whether it is a long-distance diagonal pass: Length >= 30m and |angle| >= 40 degrees (about 0.698 rad)
+is_long_diagonal <- function(length, angle) {
+  ifelse(!is.na(length) & !is.na(angle),
+         (length >= 30) & (abs(angle) >= 0.698), NA)
+}
+
+# Entering the final third: end_x >= 80 (StatsBomb coordinates 0-120)
+enter_final_third <- function(end_x) {
+  ifelse(!is.na(end_x), end_x >= 80, NA)
+}
+
+# Whether to enter the penalty area: end_x >= 102 and 18<= end_y <= 62 (approximately the large penalty area)
+into_pen_area <- function(end_x, end_y) {
+  ifelse(!is.na(end_x) & !is.na(end_y),
+         (end_x >= 102) & (end_y >= 18) & (end_y <= 62), NA)
+}
+
+# Is the shot inside the penalty area?
+shot_in_box <- function(x) ifelse(!is.na(x), x >= 102, NA)
+
+# Is the shot inside the penalty area?
+per90 <- function(n, minutes=90) n / minutes * 90
+```
+
+#### Constructing player behavior event set
+
+```{r, eval=FALSE}
+passes <- player_events %>%
+  filter(type.name == "Pass") %>%
+  mutate(
+    fwd = is_forward_pass(location.x, pass.end_location.x),
+    long_diag = is_long_diagonal(pass.length, pass.angle),
+    into_final_third = enter_final_third(pass.end_location.x),
+    into_pen_area = into_pen_area(pass.end_location.x, pass.end_location.y),
+    completed = ifelse(is.na(pass.outcome.name) | pass.outcome.name == "Complete", 1L, 0L),
+    height_high = ifelse(pass.height.name %in% c("High Pass"), 1L, 0L),
+    is_switch = ifelse(pass.switch %in% TRUE, 1L, 0L),
+    is_through = ifelse(pass.through_ball %in% TRUE, 1L, 0L),
+    is_keypass = ifelse(pass.shot_assist %in% TRUE, 1L, 0L)
+  )
+
+carries <- player_events %>%
+  filter(type.name == "Carry") %>%
+  mutate(
+    carry_into_final_third = enter_final_third(carry.end_location.x),
+    carry_into_pen_area = into_pen_area(carry.end_location.x, carry.end_location.y)
+  )
+
+shots <- player_events %>%
+  filter(type.name == "Shot") %>%
+  mutate(
+    shot_goal = ifelse(shot.outcome.name == "Goal", 1L, 0L),
+    shot_in_box = shot_in_box(location.x)
+  )
+
+```
+
+### Statistics of actions per player, per game, home/away (raw count)
+
+::: callout-note
+Minutes is first approximated with 90 (if more accurate, it can be replaced with actual minutes)
+:::
+
+```{r, eval=FALSE}
+per_match_player <- passes %>%
+  group_by(match_id, team.name, home_away, player.id, player.name) %>%
+  summarise(
+    pass_total = n(),
+    pass_completed = sum(completed, na.rm = TRUE),
+    forward_passes = sum(fwd, na.rm = TRUE),
+    long_diags = sum(long_diag, na.rm = TRUE),
+    switches = sum(is_switch, na.rm = TRUE),
+    through_balls = sum(is_through, na.rm = TRUE),
+    key_passes = sum(is_keypass, na.rm = TRUE),
+    into_final_third_pass = sum(into_final_third, na.rm = TRUE),
+    into_pen_area_pass = sum(into_pen_area, na.rm = TRUE),
+    high_passes = sum(height_high, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # carries
+  left_join(
+    carries %>%
+      group_by(match_id, team.name, home_away, player.id, player.name) %>%
+      summarise(
+        carries_n = n(),
+        carry_into_final_third_n = sum(carry_into_final_third, na.rm = TRUE),
+        carry_into_pen_area_n = sum(carry_into_pen_area, na.rm = TRUE),
+        .groups = "drop"
+      ),
+    by = c("match_id","team.name","home_away","player.id","player.name")
+  ) %>%
+  #  shots
+  left_join(
+    shots %>%
+      group_by(match_id, team.name, home_away, player.id, player.name) %>%
+      summarise(
+        shots_n = n(),
+        shots_in_box_n = sum(shot_in_box, na.rm = TRUE),
+        goals_n = sum(shot_goal, na.rm = TRUE),
+        .groups = "drop"
+      ),
+    by = c("match_id","team.name","home_away","player.id","player.name")
+  ) %>%
+  # NA -> 0
+  mutate(across(where(is.numeric), ~replace_na(., 0)))
+```
+
+#### Every 90 indicators
+
+```{r, eval=FALSE}
+per_match_player <- per_match_player %>%
+  mutate(
+    pass_per90 = per90(pass_total),
+    forward_pass_per90 = per90(forward_passes),
+    long_diag_per90 = per90(long_diags),
+    switch_per90 = per90(switches),
+    through_ball_per90 = per90(through_balls),
+    key_pass_per90 = per90(key_passes),
+    into_final_third_pass_per90 = per90(into_final_third_pass),
+    into_pen_area_pass_per90 = per90(into_pen_area_pass),
+    carry_per90 = per90(carries_n),
+    carry_into_final_third_per90 = per90(carry_into_final_third_n),
+    carry_into_pen_area_per90 = per90(carry_into_pen_area_n),
+    shots_per90 = per90(shots_n),
+    shots_in_box_per90 = per90(shots_in_box_n),
+    goals_per90 = per90(goals_n),
+    pass_comp_rate = ifelse(pass_total > 0, pass_completed / pass_total, NA_real_)
+  )
+```
+
+#### Aggregated to the “player-season-home/away” level
+
+```{r, eval=FALSE}
+player_season_side <- per_match_player %>%
+  group_by(player.id, player.name, team.name, home_away) %>%
+  summarise(
+    games = n(),
+    across(ends_with("per90"), mean, na.rm = TRUE),
+    pass_comp_rate = mean(pass_comp_rate, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+#### Filter
+
+```{r, eval=FALSE}
+eligible_players <- player_season_side %>%
+  count(player.id) %>%
+  filter(n >= 2) %>%
+  pull(player.id)
+
+player_season_side <- player_season_side %>%
+  filter(player.id %in% eligible_players)
+
+player_home_away <- player_season_side %>%
+  pivot_wider(
+    names_from = home_away,
+    values_from = c(games, ends_with("per90"), pass_comp_rate),
+    names_sep = "_"
+  ) %>%
+  
+  filter(!is.na(games_Home) & !is.na(games_Away))
+```
+
+### Calculate home-away difference
+
+**positive number = home team is more offensive/more frequent**
+
+```{r, eval=FALSE}
+diff_df <- player_home_away %>%
+  mutate(
+    d_forward_pass = forward_pass_per90_Home - forward_pass_per90_Away,
+    d_long_diag = long_diag_per90_Home - long_diag_per90_Away,
+    d_switch = switch_per90_Home - switch_per90_Away,
+    d_through = through_ball_per90_Home - through_ball_per90_Away,
+    d_keypass = key_pass_per90_Home - key_pass_per90_Away,
+    d_into_f3 = into_final_third_pass_per90_Home - into_final_third_pass_per90_Away,
+    d_into_pa = into_pen_area_pass_per90_Home - into_pen_area_pass_per90_Away,
+    d_carry_f3 = carry_into_final_third_per90_Home - carry_into_final_third_per90_Away,
+    d_carry_pa = carry_into_pen_area_per90_Home - carry_into_pen_area_per90_Away,
+    d_shots = shots_per90_Home - shots_per90_Away,
+    d_shots_inbox = shots_in_box_per90_Home - shots_in_box_per90_Away,
+    d_goals = goals_per90_Home - goals_per90_Away,
+    d_pass_comp = pass_comp_rate_Home - pass_comp_rate_Away
+  )
+```
+
+#### Statistical test
+
+::: callout-note
+Paired t test, with “player” as the pairing unit)
+:::
+
+```{r, eval=FALSE}
+test_cols <- c("d_forward_pass","d_long_diag","d_switch","d_through","d_keypass",
+               "d_into_f3","d_into_pa","d_carry_f3","d_carry_pa",
+               "d_shots","d_shots_inbox","d_goals","d_pass_comp")
+
+paired_tests <- map_dfr(test_cols, function(v){
+  x <- diff_df[[v]]
+  x <- x[!is.na(x)]
+  tt <- t.test(x, mu = 0)
+  tibble(
+    metric = v,
+    mean_diff = mean(x, na.rm = TRUE),
+    t = unname(tt$statistic),
+    p_value = tt$p.value
+  )
+}) %>%
+  arrange(p_value)
+```
+
+### Example: Top Players
+
+```{r, eval=FALSE}
+top_players_longdiag <- diff_df %>%
+  arrange(desc(d_long_diag)) %>%
+  slice_head(n = 15) %>%
+  select(player.name, team.name, d_long_diag, games_Home, games_Away)
+
+top_players_into_f3 <- diff_df %>%
+  arrange(desc(d_into_f3)) %>%
+  slice_head(n = 15) %>%
+  select(player.name, team.name, d_into_f3, games_Home, games_Away)
+```
+
+![](19.png)
+
+![](20.png)
+
+### Visualization
+
+#### Changes in “diagonal passes/forward passes/entering the third zone” at home and away games
+
+```{r, eval=FALSE}
+ggplot(diff_df, aes(x = d_long_diag)) +
+  geom_histogram(bins = 30) +
+  labs(title = "Home - Away: Long Diagonal Pass per 90 Difference Distribution", x = "Difference (>0 more at home)", y = "Number of players")
+```
+
+![](21.png) 
+
+#### Slope graph at player level
+
+```{r, eval=FALSE}
+plot_df <- diff_df %>%
+  select(player.name, team.name,
+         into_final_third_pass_per90_Home, into_final_third_pass_per90_Away) %>%
+  arrange(desc(into_final_third_pass_per90_Home - into_final_third_pass_per90_Away)) %>%
+  slice_head(n = 20) %>%
+  pivot_longer(cols = c(into_final_third_pass_per90_Home, into_final_third_pass_per90_Away),
+               names_to = "side", values_to = "val") %>%
+  mutate(side = ifelse(str_detect(side, "Home"), "Home", "Away"))
+
+ggplot(plot_df, aes(x = side, y = val, group = player.name)) +
+  geom_line(alpha = 0.5) +
+  geom_point() +
+  facet_wrap(~ team.name, scales = "free_y") +
+  labs(title = "Top20：Home/Away Pass into the final third per90",
+       x = "", y = "per90")
+```
+
+![](22.png) 
+
+### Result Saving
+
+We save the outputs into csv for further use.
+
+```{r, eval=FALSE}
+write.csv(player_home_away, "player_behavior_home_away_per90.csv", row.names = FALSE)
+write.csv(diff_df, "player_behavior_home_minus_away.csv", row.names = FALSE)
+write.csv(paired_tests, "player_behavior_paired_tests.csv", row.names = FALSE)
+write.csv(top_players_longdiag, "top_players_long_diagonal.csv", row.names = FALSE)
+write.csv(top_players_into_f3, "top_players_into_final_third.csv", row.names = FALSE)
+```
+
+### Conclusion
+
+In this analysis, we examined player behaviors in the 2015/16 Bundesliga season using StatsBomb event data. By comparing per-90 statistics between home and away matches, I found that players generally show stronger offensive tendencies at home. Forward passes, long diagonal passes, and key passes occur more frequently in home games, and players also make more passes and carries into the final third and penalty area. Although the increase in shots and goals is smaller, it follows the same direction. Overall, these results suggest that home matches encourage players to take more creative and progressive actions, reflecting a behavioral dimension of home advantage beyond team performance itself.
+
+## PART 3: Analysis of Ball Possession by Player Position
+
+### Data Preparation
+
+#### Custom Data List
+
+```{r, eval=FALSE}
+comps <- StatsBombR::FreeCompetitions()
+
+matches_1516<-StatsBombR::FreeCompetitions() |>
+  dplyr::filter(competition_id == 9,season_id == 27) |>
+  StatsBombR::FreeMatches() |>
+  dplyr::select(match_id,match_date,home_team.home_team_name,away_team.away_team_name,home_score, away_score)
+
+events_1516 <- StatsBombR::FreeCompetitions() |>
+  dplyr::filter(competition_id == 9,season_id == 27) |>
+  StatsBombR::FreeMatches() |>
+  StatsBombR::free_allevents() |>
+  StatsBombR::allclean()
+
+homeoraway <- matches_1516 |>
+  dplyr::select(match_id,home_team.home_team_name,away_team.away_team_name)
+```
+
+#### Label the Home/Away Matches
+
+```{r, eval=FALSE}
+ev_tag <- events_1516 |>
+  dplyr::mutate(team = possession_team.name) |>
+  dplyr::left_join(homeoraway, by = "match_id") |>
+  dplyr::mutate(is_home_for_team = dplyr::case_when(
+    team == home_team.home_team_name ~ TRUE,# If `team` equals the home team name -> TRUE (home event)
+    team == away_team.away_team_name ~ FALSE,
+    TRUE ~ NA
+  ))
+```
+
+#### Separate Observations for Players in Different Positions
+
+```{r, eval=FALSE}
+DF_names <- c("Left Back","Right Back","Center Back","Left Center Back","Right Center Back","Left Wing Back","Right Wing Back")
+
+MF_names <- c("Center Attacking Midfield","Left Attacking Midfield","Right Attacking Midfield","Center Defensive Midfield","Left Defensive Midfield","Right Defensive Midfield","Center Midfield","Left Midfield","Right Midfield","Left Center Midfield","Right Center Midfield")
+
+FW_names <- c("Center Forward","Left Center Forward","Right Center Forward","Left Wing","Right Wing")
+
+ev_pos <- ev_tag %>%
+  mutate(
+    pos_guess = position.name,
+    pos_group = case_when(
+      pos_guess %in% DF_names ~ "DF",
+      pos_guess %in% MF_names ~ "MF",
+      pos_guess %in% FW_names ~ "FW",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(pos_group)) %>%    
+  mutate(pos_group = factor(pos_group, levels = c("DF","MF","FW")))
+```
+
+![](11.png)
+
+#### The Regular events when Having Ball Possession
+
+```{r, eval=FALSE}
+keep_types <- c("Pass","Carry","Ball Receipt","shot")
+ev_xy <- ev_pos |>
+  dplyr::filter(type.name %in% keep_types) |>
+  dplyr::select(match_id, team, is_home_for_team, pos_group, duration, location) |>
+  tidyr::unnest_wider(location, names_sep = "_") |>
+  dplyr::rename(x = location_1, y = location_2) |>
+  dplyr::filter(!is.na(x), !is.na(y), !is.na(pos_group)) |>
+  dplyr::mutate(
+    w=duration,
+    in_opp_half = x > 60,
+    in_box = (x >= 102 & x <= 120 & y >= 18 & y <= 62)
+  )
+```
+
+#### The Regular events when Having Ball Possession
+
+```{r, eval=FALSE}
+agg_by_pos <- ev_xy |>
+  dplyr::group_by(team, is_home_for_team, pos_group) |>
+  dplyr::summarise(
+    w_tot = sum(w, na.rm = TRUE),
+    w_half = sum(w[in_opp_half], na.rm = TRUE),
+    w_box = sum(w[in_box], na.rm = TRUE),
+    n_events = dplyr::n(),
+    .groups = "drop"
+  ) |>
+  dplyr::mutate(
+    pct_in_opp_half = dplyr::if_else(w_tot > 0, w_half / w_tot, NA_real_),
+    pct_in_box = dplyr::if_else(w_tot > 0, w_box / w_tot, NA_real_)
+  )
+half_wide_pos <- agg_by_pos |>
+  dplyr::select(team, pos_group, is_home_for_team, pct_in_opp_half) |>
+  tidyr::pivot_wider(
+    id_cols = c(team, pos_group),
+    names_from = is_home_for_team,
+    values_from = pct_in_opp_half,
+    names_glue = "pct_in_opp_half_{ifelse(is_home_for_team,'home','away')}"
+  ) |>
+  dplyr::mutate(delta_home_minus_away = pct_in_opp_half_home - pct_in_opp_half_away)
+box_wide_pos <- agg_by_pos |>
+  dplyr::select(team, pos_group, is_home_for_team, pct_in_box) |>
+  tidyr::pivot_wider(
+    id_cols = c(team, pos_group),
+    names_from = is_home_for_team,
+    values_from = pct_in_box,
+    names_glue = "pct_in_box_{ifelse(is_home_for_team,'home','away')}"
+  ) |>
+  dplyr::mutate(delta_home_minus_away = pct_in_box_home - pct_in_box_away)
+```
+
+![](12.png)
+
+![](13.png)
+
+We save the data into a csv file for further formula building.
+
+### HeatMap
+
+```{r, eval=FALSE}
+team_heatmap <- function(team_name, events_xy = ev_xy, bins = 35){
+  dat <- events_xy |>
+    dplyr::filter(team == team_name,
+                  !is.na(is_home_for_team), !is.na(x), !is.na(y), !is.na(pos_group)) |>
+    dplyr::mutate(pos_group = factor(pos_group, levels = c("DF","MF","FW"))) |>
+    droplevels()
+  ggplot2::ggplot(dat, ggplot2::aes(x = x, y = y)) +
+    ggplot2::geom_bin2d(ggplot2::aes(weight = w), bins = bins) +
+    ggplot2::facet_grid(
+      is_home_for_team ~ pos_group,
+      labeller = ggplot2::labeller(is_home_for_team = c(`TRUE`="Home", `FALSE`="Away"))
+    ) +
+    ggplot2::coord_fixed() +
+    ggplot2::scale_y_reverse() +
+    ggplot2::scale_fill_continuous(name = "weight possession time",low="steelblue",high="black") + 
+    ggplot2::labs(
+      title = paste0(team_name, " — Possession Heatmaps"),
+      x = "x (0–120)", y = "y (0–80)"
+    ) +
+    ggplot2::theme_minimal()
+}
+```
+
+```{r, eval=FALSE}
+teams_1516 <- sort(unique(c(matches_1516$home_team.home_team_name,
+                            matches_1516$away_team.away_team_name)))
+
+for (t in teams_1516) {
+  heatp <- team_heatmap(t)
+  print(heatp)       
+}
+```
+
+![](17.png)
+
+#### Example: Bayern Munich
+
+![](14.png)
+
+### Summary of the General Comparison
+
+```{r, eval=FALSE}
+pos_summary <- function(team_name) {
+  ev_xy %>%
+    dplyr::filter(team == team_name, !is.na(pos_group)) %>%
+    dplyr::mutate(
+      in_opp_half = x > 60,
+      in_box = (x >= 102 & x <= 120 & y >= 18 & y <= 62)
+    ) %>%
+    dplyr::group_by(is_home_for_team, pos_group) %>%
+    dplyr::summarise(
+      w_tot  = sum(w, na.rm = TRUE),
+      w_half = sum(w[in_opp_half], na.rm = TRUE),
+      w_box  = sum(w[in_box],      na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(
+      pct_half = dplyr::if_else(w_tot > 0, w_half / w_tot, NA_real_),
+      pct_box  = dplyr::if_else(w_tot > 0, w_box  / w_tot, NA_real_)
+    ) %>%
+    dplyr::mutate(side = dplyr::if_else(is_home_for_team, "Home", "Away"))
+}
+
+plot_pos_bars <- function(team_name){
+  df <- pos_summary(team_name)
+
+  p1 <- ggplot2::ggplot(df, ggplot2::aes(pos_group, pct_half, fill = side)) +
+    ggplot2::geom_col(position = ggplot2::position_dodge(width = 0.7), width = 0.6) +
+    ggplot2::scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    ggplot2::labs(
+      title = paste0(team_name, " Opponent Half Possession"),
+      x = NULL, y = "% time in opponent half"
+    )
+
+  p2 <- ggplot2::ggplot(df, ggplot2::aes(pos_group, pct_box, fill = side)) +
+    ggplot2::geom_col(position = ggplot2::position_dodge(width = 0.7), width = 0.6) +
+    ggplot2::scale_y_continuous(labels = scales::percent_format(accuracy = 0.1)) +
+    ggplot2::labs(
+      title = paste0(team_name, " Opponent Box Possession"),
+      x = NULL, y = "% time in opponent box"
+    )
+
+  list(half = p1, box = p2)
+}
+```
+
+```{r, eval=FALSE}
+for (t in teams_1516) {
+  plots <- plot_pos_bars(t)
+  print(plots$half)
+  print(plots$box)
+}
+```
+
+![](18.png)
+
+#### Example: Bayern Munich
+
+![](15.png)
+
+![](16.png)
+
+### Conclusion
+
+We can see that when the same team is at home or away, there are some differences in the opponent's penalty area or half. We will give this difference a certain weight in the subsequent custom formula to measure the home bonus factor.
+
+## Formula Built for Home Advantage’s Impact on Offensive Performance
+
+### Standardized Team Data on Objective values
+
+#### Data Preparation
+
+First, we generalize the former csv files into convenient data columns.
+
+It includes five aspects, based on the part 1 coding:
+
+1.  The percentage increase in chance creation (xG) at home compared to away
+
+    *Formula: (Home xG/game - Away xG/game) / Away xG/game × 100*
+
+2.  Difference in chance taking (G-xG) at home compared to away
+
+    *Formula: (Home G-xG) - (Away G-xG)*
+
+3.  The percentage increase in shots at home compared to away
+
+    *Formula: (Home shots/game - Away shots/game) / Away shots/game × 100*
+
+4.  The percentage increase in the quality of single shots (xG per shot) at home compared to away
+
+    *Formula: (Home xG/shot - Away xG/shot) / Away xG/shot × 100*
+
+5.  The percentage increase in actual goals scored at home compared to away games
+
+    *Formula: (Home goals/game - Away goals/game) / Away goals/game × 100*
+
+```{r, eval=FALSE}
+Team_Obj <- read.csv("/Users/sly/Desktop/479-SportsTopics/project1/csv_files/PART1_STANDARDIZED_METRICS.csv")
+```
+
+#### Data Processing
+
+We want to give the indicators weights to construct them into a general indicator. The weights can be based on personal preference. Of course, the weights can be redefined. In this case, we give weights for these reasons:
+
+::: callout-note
+##### Overall Goals: 0.30
+
+The actual facts that differs because of the home/away factor, which is calculated only using the raw data without any proccession, so we set it as the most important one by giving it the most weight.
+:::
+
+::: callout-note
+##### Chance Creation:0.25
+
+This data is only calculated by our custom xG formula, and it more intuitively shows the offensive enthusiasm.
+:::
+
+::: callout-note
+##### Shot Frequency:0.20
+
+Similar to **Overall Goals**, this data is also based on the fixed data set, showing the teams' attempt to shoot directly.
+:::
+
+::: callout-note
+##### Chance Conversion:0.15
+
+Similar to the **Chance Creation**, but since the conversion include some factors of luck, so we weigh it not as important as the **Chance Creation**.
+:::
+
+::: callout-note
+##### Shot Quality:0.10
+
+It is quite abstract and also contains luck factor. So we weigh it lightest.
+:::
+
+```{r, eval=FALSE}
+# weight
+
+# W_goals (overall_goals)
+W_goals <- 0.30
+
+# W_creation (chance_creation)
+W_creation <- 0.25
+
+# W_frequency (shot_frequency)
+W_frequency <- 0.20
+
+# W_conversion (chance_conversion)
+W_conversion <- 0.15
+
+# W_quality (shot_quality)
+W_quality <- 0.10
+```
+
+#### Linear Formula Building
+
+We will build an easy-understanding linear formula to explain how to measure the index directly.
+
+```{r, eval=FALSE}
+# Standardization
+home_offense_index_data <- Team_Obj %>%
+  mutate(
+    Z_goals = scale(overall_goals)[, 1],
+    Z_creation = scale(chance_creation)[, 1],
+    Z_conversion = scale(chance_conversion)[, 1],
+    Z_quality = scale(shot_quality)[, 1],
+    Z_frequency = scale(shot_frequency)[, 1]
+  ) %>%
+  
+#Linear Formula
+  mutate(
+    Home_Offense_Index = (W_goals * Z_goals) + 
+                         (W_creation * Z_creation) + 
+                         (W_conversion * Z_conversion) + 
+                         (W_quality * Z_quality) + 
+                         (W_frequency * Z_frequency)
+  ) %>%
+  
+# Output
+  select(Team = team.name, Home_Offense_Index) %>%
+  arrange(desc(Home_Offense_Index))
+```
+
+#### Visualization
+
+```{r, eval=FALSE}
+ggplot(home_offense_index_data, aes(x = Team, y = Home_Offense_Index, fill = Home_Offense_Index)) +
+  
+  geom_col() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "darkgrey") +
+  geom_text(aes(label = round(Home_Offense_Index, 2)), 
+            hjust = if_else(home_offense_index_data$Home_Offense_Index < 0, 1.2, -0.2), 
+            size = 3) +
+  
+  coord_flip() +
+  
+  labs(
+    title = "Home Offense Index",
+    subtitle = "Linear Formula",
+    x = "Team",
+    y = "Offensive Index",
+  ) +
+  
+  scale_fill_gradient2(
+    low = "firebrick",    # negative
+    mid = "white",        # avarage
+    high = "forestgreen", # positive
+    midpoint = 0
+  ) +
+
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0),
+    legend.position = "none" 
+  )
+```
+
+![](23.png)
+
+The greener the bar is, which means the team behave much more offensive in their home matches.
+
+The opposite ones mean the team may behave better in away matches.
+
+### Adding Data on Ball Possession's Heatmaps
+
+At the same time, where the ball possessions were also indicate the total circumstance of the teams’ aggression in attacks.Theoretically, the closer you are to the opponent's penalty area and the longer the ball stays in the opponent's half, the more active the team's attack is.
+
+We have pre-processed the data (in part 2), divided the players on the field (excluding goalkeepers) into three categories according to their positions, and counted the ball possession positions separately.
+
+#### Data Preparation
+
+```{r, eval=FALSE}
+Team_box <- read.csv("/Users/sly/Desktop/479-SportsTopics/project1/csv_files/box_wide_pos.csv")
+Team_half <- read.csv("/Users/sly/Desktop/479-SportsTopics/project1/csv_files/half_wide_pos.csv")
+```
+
+#### Data Processing
+
+To make it much more convenient, we combine two data sets into one and clear some unnecessary columns, so we can focus on the differences only.
+
+```{r, eval=FALSE}
+df_box_clean <- Team_box %>%
+  select(team, pos_group, delta_in_box = delta_home_minus_away)
+
+df_half_clean <- Team_half %>%
+  select(team, pos_group, delta_in_half = delta_home_minus_away)
+
+df_merged <- inner_join(
+  df_box_clean,
+  df_half_clean,
+  by = c("team", "pos_group")
+)
+```
+
+![](24.png)
+
+##### Weight Setting
+
+::: callout-note
+##### **HALF and BOX**
+
+Box: 0.70
+
+Half: 0.30
+
+*The ball in the opponent's penalty area has a more direct impact on the offense and is more threatening.*
+:::
+
+::: callout-note
+##### **Players' Positions**
+
+DF: 0.50
+
+MF: 0.30
+
+FW: 0.20
+
+*The forward positioning of midfielders and backfield players can further highlight the team's offensive enthusiasm.*
+:::
+
+
+```{r, eval=FALSE}
+W_Box <- 0.70
+W_Half <- 0.30
+
+W_DF <- 0.50
+W_MF <- 0.30
+W_FW <- 0.20
+
+home_possession_index_data <- df_merged %>%
+  
+  mutate(
+    Pos_Weight = case_when(
+      pos_group == "FW" ~ W_FW,
+      pos_group == "MF" ~ W_MF,
+      TRUE ~ W_DF
+    )
+  ) %>%
+  
+  mutate(
+    Weighted_Delta = (delta_in_box * W_Box * Pos_Weight) + 
+                     (delta_in_half * W_Half * Pos_Weight)
+  ) %>%
+  
+  group_by(team) %>%
+  summarise(
+    Home_Possession_Index = sum(Weighted_Delta, na.rm = TRUE) 
+  ) %>%
+  ungroup() %>%
+  
+  rename(Team = team) %>%
+  arrange(desc(Home_Possession_Index))
+```
+
+![](25.png)
+
+#### Visualization
+
+```{r, eval=FALSE}
+ggplot(home_possession_index_data, aes(x = Team, y = Home_Possession_Index, fill = Home_Possession_Index)) +
+  
+  geom_col(color = "black", size = 0.2) +
+  
+  geom_hline(yintercept = 0, linetype = "dashed", color = "darkgrey", size = 1) +
+  
+  geom_text(aes(label = round(Home_Possession_Index, 4)), 
+            hjust = if_else(home_possession_index_data$Home_Possession_Index < 0, 1.1, -0.1), 
+            size = 3) +
+  
+  coord_flip() +
+  
+  labs(
+    title = "Home Possession Index",
+    subtitle = "Linear Formula",
+    x = "Team",
+    y = "Index",
+  ) +
+
+  
+  scale_fill_gradient2(
+    low = "#0047AB",
+    mid = "white",
+    high = "#FF4500",
+    midpoint = 0
+  ) +
+  
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0),
+    plot.subtitle = element_text(color = "gray40"),
+    legend.position = "none"
+  )
+```
+![](26.png)
+
+### Looking into the Grand Total Enents of Individual Players's Events
+
+#### Data Preparation
+
+```{r, eval=FALSE}
+df_diff <- read.csv("/Users/sly/Desktop/479-SportsTopics/project1/csv_files/player_behavior_home_minus_away.csv")
+```
+
+#### Data Processing
+
+We add up the performance differences between home and away games for people on the same team, and calculate the performance of a team as a whole.
+
+```{r, eval=FALSE}
+team_behavior_aggregated <- df_diff %>%
+  group_by(team.name) %>%
+  summarise(
+    across(
+      starts_with("d_"), 
+      sum, 
+      .names = "Team_{.col}_Sum"
+    ),
+
+    Total_Games_Home = sum(games_Home, na.rm = TRUE),
+    Total_Games_Away = sum(games_Away, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  rename(Team = team.name)
+
+```
+![](27.png)
+
+Because the data here is complex and its relationship to offensive activity is more abstract, we won't quantify it into a single metric. Instead, we'll create a radar chart of each team's normalized metrics to provide an intuitive sense of the impact of home court on the offense.
+
+#### Visualization
+
+```{r, eval=FALSE}
+library(fmsb)
+library(dplyr)
+
+metric_map <- data.frame(
+  old_name = c(
+    "Team_d_forward_pass_Sum", "Team_d_long_diag_Sum", "Team_d_switch_Sum", 
+    "Team_d_through_Sum", "Team_d_keypass_Sum", "Team_d_into_f3_Sum", 
+    "Team_d_into_pa_Sum", "Team_d_carry_f3_Sum", "Team_d_carry_pa_Sum", 
+    "Team_d_shots_Sum", "Team_d_shots_inbox_Sum", "Team_d_goals_Sum"
+  ),
+  new_label = c(
+    "Forward Pass Diff", "Long Diagonal Diff", "Switch Pass Diff", 
+    "Through Ball Diff", "Key Pass Diff", "Into Final 3rd Pass Diff",
+    "Into Penalty Area Pass Diff", "Carry to Final 3rd Diff", "Carry to PA Diff",
+    "Shots Diff", "Shots In Box Diff", "Goals Diff"
+  ),
+  stringsAsFactors = FALSE
+)
+
+radar_data_raw <- team_behavior_aggregated %>%
+  select(Team, one_of(metric_map$old_name)) %>%
+  setNames(c("Team", metric_map$new_label))
+
+radar_values <- radar_data_raw %>% select(-Team)
+
+radar_values_scaled <- radar_values
+Zero_Points <- c() 
+
+for (col in colnames(radar_values)) {
+  x <- radar_values[[col]]
+  
+  current_min <- min(x, na.rm = TRUE)
+  current_max <- max(x, na.rm = TRUE)
+  
+
+  radar_values_scaled[[col]] <- (x - current_min) / (current_max - current_min)
+  
+  Zero_Points[col] <- (0 - current_min) / (current_max - current_min)
+}
+
+
+data_max_scaled <- rep(1.0, ncol(radar_values_scaled))
+data_min_scaled <- rep(0.0, ncol(radar_values_scaled))
+
+radar_df_scaled <- rbind(data_max_scaled, data_min_scaled, radar_values_scaled)
+
+colors_border <- "#007BFF" 
+colors_in <- rgb(0, 0.48, 1, 0.2) 
+radar_labels <- colnames(radar_df_scaled) 
+
+plot_single_radar_zero_base <- function(team_index) {
+  
+  team_name <- radar_data_raw$Team[team_index]
+  
+  data_for_plot <- rbind(radar_df_scaled[1:2, ], radar_df_scaled[team_index + 2, ])
+  
+  radarchart(
+    data_for_plot, 
+    axistype = 0, 
+    
+    pcol = colors_border, 
+    pfcol = colors_in, 
+    plwd = 3, 
+    plty = 1,
+    
+    cglcol = "lightgrey", 
+    cglty = 1, 
+    cglwd = 1,
+    
+    custom_grDevices = c(min(data_min_scaled), Zero_Points, max(data_max_scaled)),
+    custom_lwd = c(1, 3, 1),
+    custom_lty = c(1, 1, 1),
+    
+    axislabcol = "grey", 
+    vlcex = 0.9,
+    
+    title = paste(team_name, "Home Offense Behavior Uplift (Zero Baseline)"), 
+    calabels = radar_labels
+  )
+  
+  max_val <- round(apply(radar_values, 2, max, na.rm=TRUE)[1], 1)
+  min_val <- round(apply(radar_values, 2, min, na.rm=TRUE)[1], 1)
+  
+  text(0, 1.1, paste("Max:", max_val), col="darkgreen", cex=0.8)
+  text(0, -1.1, paste("Min:", min_val), col="darkred", cex=0.8)
+  text(0, 0, "Zero (0)", col="black", cex=0.8)
+}
+
+pdf("Team_Radar_Charts_Zero_Baseline.pdf", width = 8, height = 8)
+
+for (i in 1:nrow(radar_data_raw)) {
+  plot_single_radar_zero_base(i)
+}
+
+dev.off()
+```
+
+<embed 
+  src="Team_Radar_Charts_Zero_Baseline.pdf" 
+  type="application/pdf" 
+  width="100%" 
+  height="600px"
+/>
+
+
+##### Example
+![](1.jpg)
+
+
+## Areas for Improvement
+
+
+The current modeling approach, while providing valuable initial insights, is subject to several limitations that present clear avenues for future improvement.
+
+### 1. Data Scope and Model Robustness
+
+The most significant constraint is the **limited data scope**. Our current analysis relies exclusively on data from a single season of the German Bundesliga (or a similarly restricted dataset). This limitation means the resulting Home Offense Index, and the conclusions drawn from it, may be somewhat **arbitrary** or **overfitted** to the specifics of that season's league dynamics.
+
+**Future Direction:** To significantly enhance the model's **robustness** and **generalizability**, future research should incorporate data spanning **multiple seasons** and ideally **multiple leagues** (e.g., the "Big 5" European leagues). This expansion would allow for more rigorous validation and cross-sectional stability testing.
+
+### 2. Validation Against Expert Benchmarks
+
+A key challenge encountered during this project was the inability to directly validate our custom formula. We were unable to identify a universally recognized, **specialized metric** or **industry benchmark** (e.g., from a professional analytics firm) designed specifically to quantify a team's composite offensive advantage attributed solely to the home environment.
+
+**Future Direction:** Collaboration with professional sports organizations or expert analysts would be invaluable. The next step would involve seeking out proprietary or industry-standard **"Home Field Offensive Ratings"** to use as an external yardstick to empirically compare and tune the weights of our custom index.
+
+### 3. Trade-off Between Abstraction and Interpretability
+
+We attempted to synthesize all three major components (Offense Efficiency, Dangerous Possession, and other behavior metrics) into a single, **overarching index**. However, we found that aggregating all normalized metrics into one monolithic score significantly **reduced the model's interpretability**. The resulting single metric became less intuitive, obscuring which specific aspects (e.g., improved shot quality vs. higher passing frequency) were driving the observed home advantage.
+
+**Future Direction:** We recommend maintaining the indices as **separate, orthogonal features** (e.g., the Home Offensive Index and the Home Possession Index) for use in predictive modeling. Alternatively, if a single metric is desired, a more advanced statistical technique, such as **Principal Component Analysis (PCA)**, should be employed to objectively weight and combine the inputs in a way that maximizes variance while retaining the ability to trace the index's contribution back to the original metrics.
